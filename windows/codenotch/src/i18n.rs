@@ -11,6 +11,9 @@ pub fn resolve_auto() -> &'static str {
             if let Some(lang) = language_from_windows_locale(&name) {
                 return lang;
             }
+            if name.starts_with("pt") {
+                return "pt";
+            }
         }
     }
     "en"
@@ -127,6 +130,7 @@ pub fn tr(lang: &str, key: &str) -> &'static str {
         ("ko", "open_data") => "데이터 폴더 열기 (로그 / 아이콘)",
         ("ru", "open_data") => "Открыть папку данных (журналы / значки)",
         ("uk", "open_data") => "Відкрити теку даних (журнали / значки)",
+        ("pt", "open_data") => "Abrir pasta de dados (logs / ícones)",
         (_, "open_data") => "Open data folder (logs / icons)",
         ("ja", "refresh_all") => "すべて更新",
         ("ko", "refresh_all") => "모두 새로 고침",
@@ -162,6 +166,16 @@ pub fn tr(lang: &str, key: &str) -> &'static str {
         ("uk", "autostart") => "Запускати разом із Windows (у фоні)",
         ("ru", "refresh_all") => "Обновить всё",
         ("uk", "refresh_all") => "Оновити все",
+        ("pt", "install") => "Instalar hooks do Claude Code",
+        ("pt", "uninstall") => "Remover hooks",
+        ("pt", "language") => "Idioma",
+        ("pt", "lang_auto") => "Seguir o sistema",
+        ("pt", "reset_pos") => "Redefinir posição da barra",
+        ("pt", "quit") => "Sair",
+        ("pt", "hooks_missing") => "Hooks não instalados: clique com o botão direito no ícone da bandeja → Instalar hooks do Claude Code (a versão desktop já tem um substituto automático)",
+        ("pt", "autostart") => "Iniciar com o Windows (em segundo plano)",
+        ("pt", "refresh_all") => "Atualizar tudo",
+        ("pt", "settings") => "Configurações…",
         (_, "install") => "Install Claude Code hooks",
         (_, "uninstall") => "Uninstall hooks",
         (_, "language") => "Language",
@@ -327,6 +341,32 @@ mod tests {
         assert_eq!(language_from_windows_locale("zh-Hans-CN"), Some("zh"));
         assert_eq!(language_from_windows_locale("zh-SG"), Some("zh"));
         assert_eq!(language_from_windows_locale("zh"), Some("zh"));
+    }
+
+    const PORTUGUESE_KEYS: &[(&str, &str)] = &[
+        ("settings", "Configurações…"),
+        ("refresh_all", "Atualizar tudo"),
+        ("quit", "Sair"),
+        ("install", "Instalar hooks do Claude Code"),
+        ("uninstall", "Remover hooks"),
+        ("language", "Idioma"),
+        ("lang_auto", "Seguir o sistema"),
+        ("reset_pos", "Redefinir posição da barra"),
+        ("hooks_missing", "Hooks não instalados: clique com o botão direito no ícone da bandeja → Instalar hooks do Claude Code (a versão desktop já tem um substituto automático)"),
+        ("autostart", "Iniciar com o Windows (em segundo plano)"),
+        ("open_data", "Abrir pasta de dados (logs / ícones)"),
+    ];
+
+    #[test]
+    fn portuguese_translates_every_known_key() {
+        for (key, value) in PORTUGUESE_KEYS {
+            assert_eq!(
+                tr("pt", key),
+                *value,
+                "missing Portuguese translation for {key}"
+            );
+            assert_ne!(tr("pt", key), "?", "unknown Portuguese key {key}");
+        }
     }
 
     #[test]
