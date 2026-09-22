@@ -259,7 +259,23 @@ const AMPLE='#00FF88', WATCH='#F2FF00', CRIT='#FF3F00';
 // The status arc is neutral on purpose: the ring behind it is coloured by how much of the limit
 // is gone, and a green arc inside it reads as part of that scale. Waiting borrows the warning yellow.
 const TRACK='#303030', INK='#ffffff', DIM='#808080';
-const tone=f=> f>=0.8?CRIT : f>=0.5?WATCH : AMPLE;
+// A continuous sRGB ramp across the *whole* 0-100% range, matching UsageBand.rampColor on the
+// Mac: exact AMPLE at 0%, exact WATCH at WATCH_AT (the one interior knee, same default as the
+// Mac's watch slider), exact CRIT only at 100%. This used to be two hard cuts at 0.5 and 0.8,
+// then a ramp confined to just 0.5-0.7 — both changed colour almost as abruptly as a hard step,
+// just moved narrower; stretching the second half all the way to 100% is what actually reads as
+// gradual instead of a fast flick from yellow to orange.
+const WATCH_AT=0.5;
+function hex3(c){ const n=parseInt(c.slice(1),16); return [(n>>16)&255,(n>>8)&255,n&255]; }
+function lerpHex(a,b,t){
+  const A=hex3(a), B=hex3(b);
+  const ch=i=>Math.round(A[i]+(B[i]-A[i])*t);
+  return `rgb(${ch(0)},${ch(1)},${ch(2)})`;
+}
+const tone=f=>{
+  if(f<WATCH_AT) return lerpHex(AMPLE, WATCH, f/WATCH_AT);
+  return lerpHex(WATCH, CRIT, (f-WATCH_AT)/(1-WATCH_AT));
+};
 // Whole percents, except where rounding would read as nothing used or nothing left, as the Mac's Percent does
 function smallPct(v){
   if(v<=0) return '0';
