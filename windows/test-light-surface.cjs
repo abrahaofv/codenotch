@@ -30,6 +30,8 @@ test('light surface layers neutral grays with readable dark marks and restrained
     'runtime SVG rings read their neutral colour from the active surface');
   assert.match(notch, /const usageColor = name => neutral\(`usage-\$\{name\}`\)/,
     'status colors also follow the active surface');
+  assert.match(notch, /const tone=f=> f>=0\.8\?usageColor\('critical'\) : f>=0\.5\?usageColor\('watch'\) : usageColor\('ample'\);/,
+    'the usage ring reads each band from the active surface');
   assert.match(notch, /listen\('notch_light_surface',e=>applyLightSurface\(e\.payload\)\)/,
     'the running notch reacts without a restart');
 });
