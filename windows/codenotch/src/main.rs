@@ -1086,6 +1086,27 @@ fn set_weekly_ring(app: AppHandle, placement: String) -> String {
     value
 }
 
+/// The opaque surface behind the usage rings. The notch owns the visual state, so it receives the
+/// update immediately instead of waiting for a restart or another usage reading.
+#[tauri::command]
+fn get_notch_light_surface(app: AppHandle) -> bool {
+    let st = app.state::<AppState>();
+    let value = st.cfg.lock().unwrap().light_surface;
+    value
+}
+
+#[tauri::command]
+fn set_notch_light_surface(app: AppHandle, on: bool) -> bool {
+    {
+        let st = app.state::<AppState>();
+        let mut c = st.cfg.lock().unwrap();
+        c.light_surface = on;
+        config::save(&c);
+    }
+    let _ = app.emit("notch_light_surface", on);
+    on
+}
+
 // ---------------- tray icon readings ----------------
 
 /// The tightest metered window, ties going to the lower id so the choice never flickers. A `count`
@@ -1723,6 +1744,8 @@ fn main() {
             set_scale,
             get_weekly_ring,
             set_weekly_ring,
+            get_notch_light_surface,
+            set_notch_light_surface,
             get_tray_options,
             get_notch_slots,
             set_notch_slots,

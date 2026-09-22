@@ -148,6 +148,8 @@
         <div class="group">
           <div class="item"><span>Show</span><span class="seg" id="seg-show"><button data-v="show">Always show</button><button data-v="hover">Show on hover</button><button data-v="hide">Hide</button></span></div>
           <div class="item cap" id="cap-show" data-dynamic></div>
+          <div class="item"><span>Surface</span><span class="seg" id="seg-surface"><button data-v="dark">Dark</button><button data-v="light">Light</button></span></div>
+          <div class="item cap" id="cap-surface" data-dynamic></div>
           <div class="item"><span>Size</span><span class="seg" id="seg-size"><button data-v="0.8">Small</button><button data-v="1">Medium</button><button data-v="1.25">Large</button></span></div>
           <div class="item cap" id="cap-size" data-dynamic></div>
           <div class="item"><span>Weekly ring</span><span class="seg" id="seg-weekly"><button data-v="off">Off</button><button data-v="inside">Inside</button><button data-v="outside">Outside</button></span></div>
@@ -266,6 +268,11 @@ const PT_BR_STATIC = {
   'Turning this on adds a few lines to your Claude Code settings file so that Claude Code sends Codenotch a short message when a session starts, when it is working, when it is waiting for your answer, and when it finishes. That is what makes the ring spin and the amber ring pulse.':'Ao ativar esta opção, algumas linhas são adicionadas ao arquivo de configurações do Claude Code para que ele envie uma mensagem curta ao Codenotch quando uma sessão começa, quando está trabalhando, quando aguarda sua resposta e quando termina. Isso faz o anel girar e o anel âmbar pulsar.',
   'Notch':'Notch',
   'Show':'Exibição',
+  'Surface':'Superfície',
+  'Dark':'Escura',
+  'Light':'Clara',
+  'The original opaque black surface, with white monochrome marks.':'A superfície preta opaca original, com marcas monocromáticas brancas.',
+  'An opaque white surface, with black monochrome marks.':'Uma superfície branca opaca, com marcas monocromáticas pretas.',
   'Always show':'Sempre exibir',
   'Hide':'Ocultar',
   'Size':'Tamanho',
@@ -1026,6 +1033,35 @@ document.getElementById('sw-autostart').addEventListener('click', () => autostar
 const moveHandle = remote('get_move_handle', 'set_move_handle', 'Show move handle', () => drawSwitch(document.getElementById('sw-move'), moveHandle));
 document.getElementById('sw-move').addEventListener('click', () => moveHandle.toggle());
 
+const SURFACE_WHY = {
+  dark: 'The original opaque black surface, with white monochrome marks.',
+  light: 'An opaque white surface, with black monochrome marks.'
+};
+let lightSurface = false, surfaceBusy = false;
+function renderSurface(){
+  const value = lightSurface ? 'light' : 'dark';
+  for(const b of document.querySelectorAll('#seg-surface button')){
+    const on = b.dataset.v === value;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.disabled = surfaceBusy;
+  }
+  const why = SURFACE_WHY[value];
+  document.getElementById('cap-surface').textContent = ui(why, why);
+}
+document.getElementById('seg-surface').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if(!b || b.disabled || (b.dataset.v === 'light') === lightSurface) return;
+  const before = lightSurface;
+  lightSurface = b.dataset.v === 'light';
+  surfaceBusy = true;
+  renderSurface();
+  invoke('set_notch_light_surface', { on: lightSurface })
+    .then(v => { lightSurface = typeof v === 'boolean' ? v : lightSurface; toast(); })
+    .catch(err => { lightSurface = before; strip('Surface could not be changed: ' + errText(err)); })
+    .then(() => { surfaceBusy = false; renderSurface(); });
+});
+
 /* ---- Accounts: which providers get a ring --------------------------------
    Stored as {provider} slots, and an EMPTY list means every provider, so a provider added in a
    later version turns up by itself. At least one always stays on: saving an empty list would
@@ -1409,6 +1445,7 @@ function renderAll(){
   renderEdge();
   renderScreens();
   renderWeekly();
+  renderSurface();
   drawSwitch(document.getElementById('sw-autostart'), autostart);
   drawSwitch(document.getElementById('sw-move'), moveHandle);
   document.getElementById('title').textContent = ui(TITLES[curTab], TITLES[curTab]);
@@ -1429,6 +1466,7 @@ function boot(){
   call('get_notch_edge', undefined, null).then(v => { if(typeof v === 'string') notchEdge = v; renderEdge(); });
   refreshScreens();
   call('get_weekly_ring', undefined, null).then(v => { if(typeof v === 'string') weeklyRing = v; renderWeekly(); });
+  call('get_notch_light_surface', undefined, null).then(v => { if(typeof v === 'boolean') lightSurface = v; renderSurface(); });
   call('get_ui_flags', undefined, null).then(v => { if(v && typeof v === 'object') flags = readFlags(v); renderFlags(); });
   Promise.all([call('get_lang', undefined, 'auto'), call('get_lang_resolved', undefined, 'en')]).then(([raw, resolved]) => {
     const l = (typeof raw === 'string' && LANGS.indexOf(raw) >= 0) ? raw : 'auto';
@@ -1448,6 +1486,7 @@ window.addEventListener('focus', () => {
   refreshOptions();
   // A screen can be plugged in, and the notch carried to another edge, while this window sits behind
   call('get_notch_edge', undefined, null).then(v => { if(typeof v === 'string') notchEdge = v; renderEdge(); });
+  call('get_notch_light_surface', undefined, null).then(v => { if(typeof v === 'boolean') lightSurface = v; renderSurface(); });
   refreshScreens();
 });
 boot();
