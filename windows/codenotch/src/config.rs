@@ -98,6 +98,10 @@ pub struct Config {
     /// false = no arc above the notch to carry it by. Nothing is lost: Appearance → Edge moves it too.
     #[serde(default = "yes")]
     pub show_move_handle: bool,
+    /// The opaque notch surface. Older configs, hand-edited values and malformed values stay with
+    /// the original dark surface rather than making the whole config unreadable.
+    #[serde(default, deserialize_with = "bool_or_false")]
+    pub light_surface: bool,
 }
 
 fn default_notch_y() -> f64 {
@@ -176,6 +180,13 @@ pub fn weekly_ring_or_off(value: &str) -> String {
 fn yes() -> bool {
     true
 }
+
+fn bool_or_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(bool::deserialize(deserializer).unwrap_or(false))
+}
 fn default_antigravity_limit() -> String {
     "automatic".into()
 }
@@ -214,6 +225,7 @@ impl Default for Config {
             notch_on_hover: true,
             tray_visible: true,
             show_move_handle: true,
+            light_surface: false,
         }
     }
 }
@@ -360,5 +372,24 @@ mod tests {
         assert_eq!(weekly_ring_or_off("outside"), "outside");
         assert_eq!(weekly_ring_or_off("Inside"), "off");
         assert_eq!(weekly_ring_or_off(""), "off");
+    }
+
+    #[test]
+    fn light_surface_is_off_for_old_and_malformed_configs() {
+        let old: Config = serde_json::from_str(r#"{"notch_visible":true}"#).unwrap();
+        assert!(!old.light_surface, "an existing dark notch stays dark");
+
+        let malformed: Config = serde_json::from_str(r#"{"light_surface":"light"}"#).unwrap();
+        assert!(!malformed.light_surface, "an invalid value must not discard the rest of the config");
+
+        let light: Config = serde_json::from_str(r#"{"light_surface":true}"#).unwrap();
+        assert!(light.light_surface);
+
+        let saved = serde_json::to_value(Config {
+            light_surface: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(saved.get("light_surface").and_then(|v| v.as_bool()), Some(true));
     }
 }
