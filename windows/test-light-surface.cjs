@@ -1,6 +1,6 @@
 // Run with node --test test-light-surface.cjs from windows/.
 // Keeps the two HTML windows on the same small contract: Settings persists a choice and the notch
-// maps it to semantic CSS tokens instead of leaving a white spinner on a white surface.
+// maps it to semantic CSS tokens instead of leaving a pale spinner on a pale surface.
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const assert = require('node:assert/strict');
@@ -16,13 +16,20 @@ function lightTokens(source) {
   return match[1].replace(/\s/g, '');
 }
 
-test('light surface is opaque white with readable black neutral marks', () => {
+test('light surface layers neutral grays with readable dark marks and restrained status colors', () => {
   const tokens = lightTokens(notch);
-  for (const token of ['--surface:#fff;', '--card:#fff;', '--ink:#111;', '--ink-strong:#111;', '--track:#1d1d1f;']) {
+  for (const token of [
+    '--surface:#f6f6f3;', '--card:#fff;', '--ink:#252522;', '--ink-strong:#161614;',
+    '--edge:#c9c9c3;', '--track:#d8d8d2;', '--usage-ample:#0f704e;',
+    '--usage-watch:#8a5a00;', '--usage-critical:#a83b32;'
+  ]) {
     assert.ok(tokens.includes(token), `light surface is missing ${token}`);
   }
+  assert.ok(!tokens.includes('--surface:#fff;'), 'the pill avoids a harsh pure-white field');
   assert.match(notch, /const neutral = name => getComputedStyle\(document\.body\)/,
     'runtime SVG rings read their neutral colour from the active surface');
+  assert.match(notch, /const usageColor = name => neutral\(`usage-\$\{name\}`\)/,
+    'status colors also follow the active surface');
   assert.match(notch, /listen\('notch_light_surface',e=>applyLightSurface\(e\.payload\)\)/,
     'the running notch reacts without a restart');
 });

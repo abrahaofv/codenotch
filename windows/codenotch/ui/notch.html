@@ -8,14 +8,16 @@
     --muted:#808080; --subtle:#b0b0b3; --note:#c8c8c8; --track:#303030; --ring-inner:#2a2a2a;
     --box-edge:#242424; --divider:#1e1e1e; --armed:rgba(0,0,0,.72); --auth-status:#b9b9b9;
     --auth:#252525; --auth-hover:#383838; --auth-border:#555; --auth-border-hover:#aaa;
+    --usage-ample:#00FF88; --usage-watch:#F2FF00; --usage-critical:#FF3F00;
   }
   /* The notch has its own deliberate surface, independent from Windows' app theme. Tokens keep
-     every neutral mark in step while preserving provider imagery and the coloured usage scale. */
+     every neutral mark in step while preserving provider imagery and a quieter usage scale. */
   body.light-surface{
-    --surface:#fff; --card:#fff; --edge:#1d1d1f; --ink:#111; --ink-strong:#111;
-    --muted:#595959; --subtle:#4f4f4f; --note:#333; --track:#1d1d1f; --ring-inner:#f4f4f4;
-    --box-edge:#1d1d1f; --divider:#1d1d1f; --armed:#fff; --auth-status:#4f4f4f;
-    --auth:#f4f4f4; --auth-hover:#e6e6e6; --auth-border:#1d1d1f; --auth-border-hover:#000;
+    --surface:#f6f6f3; --card:#fff; --edge:#c9c9c3; --ink:#252522; --ink-strong:#161614;
+    --muted:#686862; --subtle:#50504b; --note:#3e3e3a; --track:#d8d8d2; --ring-inner:#ecece7;
+    --box-edge:#d3d3cd; --divider:#deded8; --armed:#f6f6f3; --auth-status:#5c5c57;
+    --auth:#eeeeea; --auth-hover:#e2e2dc; --auth-border:#bdbdb6; --auth-border-hover:#73736d;
+    --usage-ample:#0f704e; --usage-watch:#8a5a00; --usage-critical:#a83b32;
   }
   .c-auth{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
   .c-auth button{font:inherit;font-size:11px;color:var(--ink);background:var(--auth);border:1px solid var(--auth-border);border-radius:7px;padding:6px 9px;cursor:pointer}
@@ -107,7 +109,7 @@
     display:none;
   }
   #card.show{display:block}
-  body.light-surface #card{border:1px solid var(--edge);box-shadow:0 8px 20px rgba(0,0,0,.18)}
+  body.light-surface #card{border:1px solid var(--edge);box-shadow:0 8px 20px rgba(28,28,24,.12)}
   /* The tail, its point on the hovered ring: the Mac's curved wedge (TooltipTail), whose shoulders
      leave the card tangent to its edge so the two read as one shape. An element of its own rather
      than ::after, so the card's overflow cannot clip it and it can be reported as hot. It spans the
@@ -269,11 +271,12 @@
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 
-/* Colour ramp (upstream palette values) */
-const AMPLE='#00FF88', WATCH='#F2FF00', CRIT='#FF3F00';
+/* The dark surface retains its vivid palette; Light maps the same semantic states to calmer,
+   darker accents that keep their contrast against an off-white surface. */
 // The status arc is neutral on purpose: the ring behind it is coloured by how much of the limit
 // is gone, and a green arc inside it reads as part of that scale. Waiting borrows the warning yellow.
 const neutral = name => getComputedStyle(document.body).getPropertyValue(`--${name}`).trim();
+const usageColor = name => neutral(`usage-${name}`);
 // A continuous sRGB ramp across the *whole* 0-100% range, matching UsageBand.rampColor on the
 // Mac: exact AMPLE at 0%, exact WATCH at WATCH_AT (the one interior knee, same default as the
 // Mac's watch slider), exact CRIT only at 100%. This used to be two hard cuts at 0.5 and 0.8,
@@ -288,8 +291,8 @@ function lerpHex(a,b,t){
   return `rgb(${ch(0)},${ch(1)},${ch(2)})`;
 }
 const tone=f=>{
-  if(f<WATCH_AT) return lerpHex(AMPLE, WATCH, f/WATCH_AT);
-  return lerpHex(WATCH, CRIT, (f-WATCH_AT)/(1-WATCH_AT));
+  if(f<WATCH_AT) return lerpHex(usageColor('ample'), usageColor('watch'), f/WATCH_AT);
+  return lerpHex(usageColor('watch'), usageColor('critical'), (f-WATCH_AT)/(1-WATCH_AT));
 };
 // Whole percents, except where rounding would read as nothing used or nothing left, as the Mac's Percent does
 function smallPct(v){
@@ -1068,7 +1071,7 @@ function renderRing(){
       // Its own layer, so a stale reading can dim around it without dimming it: see `.ringwrap.stale`
       const ws=workState(p.base);
       if(ws==='running') activity.innerHTML=`<g class="arc-spin">${svgArc(19,0.28,ink,2.5)}</g>`;
-      else if(ws==='attention') activity.innerHTML=`<g class="arc-pulse"><circle cx="28" cy="28" r="19" fill="none" stroke="${WATCH}" stroke-width="2.5"/></g>`;
+      else if(ws==='attention') activity.innerHTML=`<g class="arc-pulse"><circle cx="28" cy="28" r="19" fill="none" stroke="${usageColor('watch')}" stroke-width="2.5"/></g>`;
       else activity.innerHTML='';
     }
     if(p.snap.status==='needsAuth'||p.snap.status==='none') pct.textContent='—';
@@ -1105,7 +1108,7 @@ function ago(ms){
   return ui().ago(m);
 }
 
-const STATE_DOT={running:()=>neutral('ink'),attention:()=>WATCH,done:()=>AMPLE,idle:()=>neutral('track')};
+const STATE_DOT={running:()=>neutral('ink'),attention:()=>usageColor('watch'),done:()=>usageColor('ample'),idle:()=>neutral('track')};
 // The card is clipped, not scrolled, so rows past this would push its title off the top; the rest are counted, as on the Mac
 const SESSION_ROWS=5;
 function moreRow(n){ return n>0?`<div class="s-more">${ui().andMore(n)}</div>`:''; }
@@ -1188,7 +1191,7 @@ function renderCard(){
     if(acts.length){
       html+=`<div class="c-sessions">`;
       for(const a of acts.slice(0,SESSION_ROWS)){
-        const col=a.state==='waiting'?WATCH:neutral('ink');
+        const col=a.state==='waiting'?usageColor('watch'):neutral('ink');
         html+=`<div class="s-row"><span class="s-dot" style="background:${col}"></span>${esc(a.name)}<span style="color:${neutral('muted')};margin-left:auto">${esc(textCopy(a.detail))}</span></div>`;
       }
       html+=moreRow(acts.length-SESSION_ROWS)+`</div>`;
