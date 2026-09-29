@@ -1,6 +1,7 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 mod autostart;
+mod backdrop;
 mod config;
 mod doctor;
 mod focus;
@@ -18,6 +19,7 @@ mod cursor;
 mod grok;
 mod antigravity;
 mod glm;
+mod opencode;
 mod agy_cli;
 mod glyphs;
 mod trayicon;
@@ -57,6 +59,8 @@ pub struct AppState {
     pub antigravity: Mutex<usage::UsageSnapshot>,
     /// GLM Coding Plan snapshot, read from the existing Z.AI tool credentials.
     pub glm: Mutex<usage::UsageSnapshot>,
+    /// OpenCode Go plan snapshot, read with OpenCode's own sign-in (auth.json or opencode.db).
+    pub opencode: Mutex<usage::UsageSnapshot>,
     /// Provider glyph cache, collected at launch and again on a tray refresh
     pub glyphs: Mutex<std::collections::HashMap<String, glyphs::Glyph>>,
     /// Working state of the non-Claude providers (Cursor reports it; Codex and Antigravity are inferred from recent writes)
@@ -376,11 +380,18 @@ const WORK_AREA_POLL_MS: u64 = 1000;
 fn start_work_area_watch(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last = target_screen(&app).map(|s| s.work);
+        let mut last_theme = resolved_theme(&app);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(WORK_AREA_POLL_MS));
             // Mid-drag the notch is following the pointer, and placing it again would fight that.
             if DRAGGING.load(std::sync::atomic::Ordering::SeqCst) {
                 continue;
+            }
+            let system = resolved_theme(&app);
+            if system != last_theme {
+                applog(&format!("appearance changed: {last_theme} -> {system}"));
+                last_theme = system;
+                apply_theme(&app);
             }
             let now = target_screen(&app).map(|s| s.work);
             if now == last {
@@ -677,6 +688,7 @@ pub(crate) fn refresh_provider(app: &AppHandle, provider: &str) -> bool {
         "grok" => grok::request_refresh(),
         "gemini" => antigravity::request_refresh(),
         "glm" => glm::request_refresh(),
+        "opencode" => opencode::request_refresh(),
         _ => return false,
     }
     true
@@ -704,6 +716,11 @@ fn get_antigravity(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 #[tauri::command]
 fn get_glm(state: tauri::State<AppState>) -> usage::UsageSnapshot {
     state.glm.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn get_opencode(state: tauri::State<AppState>) -> usage::UsageSnapshot {
+    state.opencode.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -762,6 +779,7 @@ pub(crate) fn provider_page(provider: &str) -> Option<(&'static str, &'static st
         "grok" => ("https://grok.com/?_s=usage", "grok.com"),
         "gemini" => ("https://antigravity.google", "antigravity.google"),
         "glm" => ("https://z.ai/manage-apikey/apikey-list", "z.ai"),
+        "opencode" => ("https://opencode.ai", "opencode.ai"),
         _ => return None,
     })
 }
@@ -792,8 +810,9 @@ static HOT: Mutex<Vec<[f64; 4]>> = Mutex::new(Vec::new());
 static EXPANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[tauri::command]
-fn set_hot(rects: Vec<[f64; 4]>, expanded: bool) {
+fn set_hot(rects: Vec<[f64; 4]>, expanded: bool, probe: Option<[f64; 4]>) {
     *HOT.lock().unwrap() = rects;
+    backdrop::set_probe(probe);
     EXPANDED.store(expanded, std::sync::atomic::Ordering::Relaxed);
     if expanded {
         antigravity::request_hover_refresh();
@@ -1063,6 +1082,90 @@ fn set_scale(app: AppHandle, scale: f64) -> f64 {
     value
 }
 
+/// The saved choice as a window theme. `None` is "follow Windows", which is also what an
+/// unreadable value falls back to, and what a window gets when it is built without asking.
+pub fn theme_choice(app: &AppHandle) -> Option<tauri::Theme> {
+    let st = app.state::<AppState>();
+    let c = st.cfg.lock().unwrap();
+    match c.theme.as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
+}
+
+/// Sets the appearance on the document before the page's own scripts run, so a window built for one
+/// carry, or opened on a dark Windows under a light choice, never paints the other one first. The
+/// element may not exist yet when this runs, which is the point of the retry.
+pub fn theme_script(theme: &str) -> String {
+    format!(
+        "window.__CN_THEME__={theme:?};(function a(){{const d=document.documentElement;if(d){{d.dataset.theme=window.__CN_THEME__;}}else{{document.addEventListener('readystatechange',a,{{once:true}});}}}})();"
+    )
+}
+
+/// Which of the two appearances is actually on: the choice, or what Windows is set to when it is
+/// "system". Read from the notch window, whose theme tao keeps in step with Windows.
+pub fn resolved_theme(app: &AppHandle) -> &'static str {
+    match theme_choice(app) {
+        Some(tauri::Theme::Light) => "light",
+        Some(tauri::Theme::Dark) => "dark",
+        _ => match app.get_webview_window("notch").and_then(|w| w.theme().ok()) {
+            Some(tauri::Theme::Light) => "light",
+            _ => "dark",
+        },
+    }
+}
+
+/// The pages switch their palette on this, rather than on `prefers-color-scheme`: correcting a live
+/// window's theme does not reliably reach WebView2's own scheme, which left a dark Settings page
+/// under light Mica, unreadable. Told plainly instead.
+#[tauri::command]
+fn get_theme_resolved(app: AppHandle) -> String {
+    resolved_theme(&app).to_string()
+}
+
+/// Light, Dark, or whatever Windows is set to.
+///
+/// One call does both pages: WebView2 turns a window's theme into `prefers-color-scheme`, which is
+/// what the pages' palettes are written against. `None` hands the choice back to Windows. Settings
+/// also sits on Mica, which follows the system on its own, so it is asked for the matching variant
+/// rather than left dark under a light page.
+pub fn apply_theme(app: &AppHandle) {
+    let theme = theme_choice(app);
+    for label in ["notch", "settings", dropzones::LABEL] {
+        if let Some(w) = app.get_webview_window(label) {
+            let _ = w.set_theme(theme);
+        }
+    }
+    settings_window::follow_theme(app, theme);
+    let _ = app.emit("theme_resolved", resolved_theme(app));
+}
+
+/// Which appearance the pages draw in.
+#[tauri::command]
+fn get_theme(app: AppHandle) -> String {
+    let st = app.state::<AppState>();
+    let c = st.cfg.lock().unwrap();
+    c.theme.clone()
+}
+
+/// Unknown values are refused rather than stored, as the other rows do.
+#[tauri::command]
+fn set_theme(app: AppHandle, theme: String) -> String {
+    let value = {
+        let st = app.state::<AppState>();
+        let mut c = st.cfg.lock().unwrap();
+        if ["system", "light", "dark"].contains(&theme.as_str()) {
+            c.theme = theme;
+            config::save(&c);
+        }
+        c.theme.clone()
+    };
+    apply_theme(&app);
+    let _ = app.emit("theme", &value);
+    value
+}
+
 /// Where the weekly limit's ring sits, if it is drawn at all.
 #[tauri::command]
 fn get_weekly_ring(app: AppHandle) -> String {
@@ -1087,25 +1190,26 @@ fn set_weekly_ring(app: AppHandle, placement: String) -> String {
     value
 }
 
-/// The opaque surface behind the usage rings. The notch owns the visual state, so it receives the
-/// update immediately instead of waiting for a restart or another usage reading.
+/// How the usage rings change colour as the allowance is used.
 #[tauri::command]
-fn get_notch_light_surface(app: AppHandle) -> bool {
+fn get_color_transition(app: AppHandle) -> String {
     let st = app.state::<AppState>();
-    let value = st.cfg.lock().unwrap().light_surface;
-    value
+    let c = st.cfg.lock().unwrap();
+    c.color_transition.clone()
 }
 
+/// Unknown values keep the existing hard steps. The notch redraws when it receives this event.
 #[tauri::command]
-fn set_notch_light_surface(app: AppHandle, on: bool) -> bool {
-    {
+fn set_color_transition(app: AppHandle, style: String) -> String {
+    let value = {
         let st = app.state::<AppState>();
         let mut c = st.cfg.lock().unwrap();
-        c.light_surface = on;
+        c.color_transition = config::color_transition_or_step(&style);
         config::save(&c);
-    }
-    let _ = app.emit("notch_light_surface", on);
-    on
+        c.color_transition.clone()
+    };
+    let _ = app.emit("color_transition", &value);
+    value
 }
 
 // ---------------- tray icon readings ----------------
@@ -1139,6 +1243,8 @@ fn ring_window<'a>(
         // plan falls through to Antigravity's lane picker and the ring shows the
         // tightest window it can find instead of the session.
         "glm" => by_id("session"),
+        // The Mac sets headlineID "rolling", weeklyID "weekly".
+        "opencode" => by_id("rolling"),
         _ => antigravity_lane(windows, antigravity_limit, antigravity_model),
     }
 }
@@ -1195,6 +1301,7 @@ pub(crate) fn snapshot_of(app: &AppHandle, id: &str) -> usage::UsageSnapshot {
         "grok" => st.grok.lock().unwrap().clone(),
         "gemini" => st.antigravity.lock().unwrap().clone(),
         "glm" => st.glm.lock().unwrap().clone(),
+        "opencode" => st.opencode.lock().unwrap().clone(),
         _ => st.usage.lock().unwrap().clone(),
     }
 }
@@ -1496,6 +1603,25 @@ fn set_move_handle(app: AppHandle, on: bool) -> bool {
     on
 }
 
+#[tauri::command]
+fn get_adaptive_pill(app: AppHandle) -> bool {
+    let st = app.state::<AppState>();
+    let c = st.cfg.lock().unwrap();
+    c.adaptive_pill
+}
+
+#[tauri::command]
+fn set_adaptive_pill(app: AppHandle, on: bool) -> bool {
+    {
+        let st = app.state::<AppState>();
+        let mut c = st.cfg.lock().unwrap();
+        c.adaptive_pill = on;
+        config::save(&c);
+    }
+    backdrop::set_enabled(&app, on);
+    on
+}
+
 /// One attached monitor, as Settings lists it.
 #[derive(serde::Serialize)]
 pub struct MonitorInfo {
@@ -1562,12 +1688,13 @@ pub fn provider_label(id: &str) -> &'static str {
         "grok" => "Grok",
         "gemini" => "Antigravity",
         "glm" => "z.ai",
+        "opencode" => "OpenCode",
         _ => "Claude",
     }
 }
 
 /// Every provider the tray menu can offer, in the order the notch shows them.
-pub const TRAY_PROVIDER_IDS: [&str; 6] = ["claude", "codex", "glm", "cursor", "grok", "gemini"];
+pub const TRAY_PROVIDER_IDS: [&str; 7] = ["claude", "codex", "glm", "opencode", "cursor", "grok", "gemini"];
 
 /// Keeps the tray menu current. macOS rebuilds its menu as it opens; Tauri has no such hook, so it
 /// is rebuilt whenever a reading changes, and once a minute besides — otherwise "Resets in 12 min"
@@ -1653,7 +1780,51 @@ fn report(r: Result<String, String>) {
 /// The subcommands that print to the parent console; only those may attach to it.
 const CONSOLE_CMDS: [&str; 4] = ["install-hooks", "uninstall-hooks", "autostart", "doctor"];
 
+/// ureq reads a proxy only from the environment. Started from Explorer or the Run key that
+/// variable is usually absent even where a system proxy is configured, and a machine that reaches
+/// api.anthropic.com only through that proxy then reads nothing at all — so the WinINet setting
+/// (Internet Options) is copied into the environment before the first request.
+/// An explicit HTTPS_PROXY/HTTP_PROXY always wins.
+#[cfg(windows)]
+fn adopt_system_proxy() {
+    if let Some(k) = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"].iter().find(|k| std::env::var_os(k).is_some()) {
+        applog(&format!("proxy: using {k} from the environment"));
+        return;
+    }
+    let query = |v: &str| -> Option<String> {
+        let mut c = std::process::Command::new("reg");
+        c.args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", v]);
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash on the GUI path
+        let out = c.output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().find(|l| l.trim_start().starts_with(v)).and_then(|l| l.split_whitespace().last().map(str::to_string))
+    };
+    let enable = query("ProxyEnable");
+    if enable.as_deref() != Some("0x1") {
+        applog(&format!("proxy: none in the environment, system proxy disabled (ProxyEnable={enable:?})"));
+        return;
+    }
+    let Some(server) = query("ProxyServer") else {
+        applog("proxy: system proxy enabled but ProxyServer is unset");
+        return;
+    };
+    // "host:port", or "http=host:port;https=host:port;..." when it is set per scheme
+    let https = server
+        .split(';')
+        .find_map(|e| e.strip_prefix("https="))
+        .or_else(|| if server.contains('=') { server.split(';').find_map(|e| e.strip_prefix("http=")) } else { Some(server.as_str()) });
+    if let Some(h) = https {
+        let url = if h.contains("://") { h.to_string() } else { format!("http://{h}") };
+        std::env::set_var("HTTPS_PROXY", &url);
+        std::env::set_var("HTTP_PROXY", &url);
+        applog(&format!("proxy: adopted system proxy {url}"));
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    adopt_system_proxy();
     let args: Vec<String> = std::env::args().collect();
     if let Some(cmd) = args.get(1) {
         // Attaching on the GUI path too tied the notch to whatever cmd.exe launched it: closing that
@@ -1712,6 +1883,7 @@ fn main() {
             grok: Mutex::new(grok::load_persisted()),
             antigravity: Mutex::new(antigravity::load_persisted()),
             glm: Mutex::new(glm::load_persisted()),
+            opencode: Mutex::new(opencode::load_persisted()),
             glyphs: Mutex::new(Default::default()),
             activity: Mutex::new(Vec::new()),
         })
@@ -1728,6 +1900,7 @@ fn main() {
             get_grok,
             get_antigravity,
             get_glm,
+            get_opencode,
             get_glyphs,
             get_activity,
             open_data_dir,
@@ -1745,8 +1918,11 @@ fn main() {
             set_scale,
             get_weekly_ring,
             set_weekly_ring,
-            get_notch_light_surface,
-            set_notch_light_surface,
+            get_color_transition,
+            set_color_transition,
+            get_theme,
+            set_theme,
+            get_theme_resolved,
             get_tray_options,
             get_notch_slots,
             set_notch_slots,
@@ -1771,6 +1947,8 @@ fn main() {
             begin_move,
             get_move_handle,
             set_move_handle,
+            get_adaptive_pill,
+            set_adaptive_pill,
             dropzones::get_zones,
             settings_window::get_system_look,
             settings_window::quit_app,
@@ -1779,6 +1957,9 @@ fn main() {
         .setup(move |app| {
             let handle = app.handle().clone();
             place_notch(&handle);
+            // Before the notch is shown: a window shown on the system appearance and corrected
+            // after paints the wrong one for a frame, which is a black flash under a light choice
+            apply_theme(&handle);
             if let Some(w) = handle.get_webview_window("notch") {
                 let _ = w.show();
             }
@@ -1796,11 +1977,13 @@ fn main() {
             grok::start(handle.clone());
             antigravity::start(handle.clone());
             glm::start(handle.clone());
+            opencode::start(handle.clone());
             activity::start(handle.clone());
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done
             let gh = handle.clone();
             std::thread::spawn(move || reload_glyphs(&gh));
             start_pointer_watchdog(handle.clone());
+            backdrop::start(handle.clone());
             start_work_area_watch(handle.clone());
             topmost::start_watchdog(handle.clone());
             // Seen-clears-it scan
@@ -1947,6 +2130,53 @@ mod tests {
         };
         assert_eq!(width_of("DESIGN_W_UPRIGHT"), notch_window_size("right").0);
         assert_eq!(width_of("DESIGN_W_FLAT"), notch_window_size("top").0);
+    }
+
+    /// A name declared in one palette and not the other keeps its dark value under a light page —
+    /// black ink on a black surface, and nothing in the build would say so, since nothing reads the
+    /// page. The two blocks are found by the ink they declare; `notch.html`'s third `:root` holds
+    /// ring metrics rather than colours.
+    #[test]
+    fn both_palettes_declare_the_same_names() {
+        let page = include_str!("../ui/notch.html");
+        let mut palettes: Vec<Vec<String>> = Vec::new();
+        let mut rest = page;
+        while let Some(at) = rest.find(":root") {
+            let after = &rest[at..];
+            let Some(open) = after.find('{') else { break };
+            let body = &after[open + 1..];
+            let end = body.find('}').expect("a :root block closes");
+            // Comments first: a `;` inside one splits a declaration in half and loses the name
+            // after it, which fails this test for a palette that is perfectly fine.
+            let mut declarations = String::new();
+            let mut left = &body[..end];
+            while let Some(open) = left.find("/*") {
+                declarations.push_str(&left[..open]);
+                match left[open..].find("*/") {
+                    Some(close) => left = &left[open + close + 2..],
+                    None => {
+                        left = "";
+                        break;
+                    }
+                }
+            }
+            declarations.push_str(left);
+            let mut names: Vec<String> = declarations
+                .split(';')
+                .filter_map(|decl| decl.split(':').next())
+                .map(str::trim)
+                .filter(|name| name.starts_with("--"))
+                .map(str::to_string)
+                .collect();
+            names.sort_unstable();
+            if names.iter().any(|name| name == "--ink") {
+                palettes.push(names);
+            }
+            rest = &body[end..];
+        }
+        assert_eq!(palettes.len(), 2, "one palette per appearance, dark and light");
+        assert_eq!(palettes[0], palettes[1], "the two palettes declare different names");
+        assert!(palettes[0].len() >= 15, "{:?} is too short to be the palette", palettes[0]);
     }
 
     /// Four triangles about the centre, so every point on the screen belongs to exactly one edge.

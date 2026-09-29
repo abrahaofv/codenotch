@@ -11,6 +11,21 @@
 
 use tauri::{AppHandle, Manager, WebviewWindow};
 
+/// The foreground hook has no user-data parameter, so its callback reads the application handle
+/// installed when the watchdog starts. `start_watchdog` is called once during app setup.
+#[cfg(windows)]
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+/// Avoid repeating a diagnostic while one persistent z-order excursion causes many foreground
+/// events. It is reset once the notch is observed back in the topmost band.
+#[cfg(windows)]
+static WAS_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The foreground callback and the slow backstop run on different threads. Serialize the complete
+/// observation and reassertion so a stale callback cannot reset and log the same excursion twice.
+#[cfg(windows)]
+static CHECK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// True once the notch has left the topmost band, by either failure mode the issue describes:
 /// its own `WS_EX_TOPMOST` bit cleared outright, or the bit surviving while an ordinary window
 /// still sits in front of it in the real z-order. A single top-to-bottom walk answers both —
@@ -55,7 +70,11 @@ pub fn is_out_of_topmost_band(window: &WebviewWindow) -> bool {
         }
         BOOL(1)
     }
-    let mut state = State { target: hwnd.0 as isize, found: false, band_broken: false };
+    let mut state = State {
+        target: hwnd.0 as isize,
+        found: false,
+        band_broken: false,
+    };
     unsafe {
         let _ = EnumWindows(Some(cb), LPARAM(&mut state as *mut _ as isize));
     }
@@ -94,25 +113,102 @@ pub fn reassert(window: &WebviewWindow) {
 #[cfg(not(windows))]
 pub fn reassert(_window: &WebviewWindow) {}
 
-/// How often the notch is checked against the topmost band. Validated on #304 at this cadence —
-/// a session logged three assertions, not one per tick, so 2s does not chase transient state.
-const TOPMOST_POLL_MS: u64 = 2000;
+/// Catches the unusual case where another application creates a topmost window without making it
+/// foreground. Foreground changes are the ordinary, event-driven path.
+#[cfg(windows)]
+const BACKSTOP_POLL_MS: u64 = 30_000;
 
-/// Polled rather than hooked, same reasoning as `start_work_area_watch`: nothing hands us an event
-/// for "another process just changed our z-order," so there is nothing to subscribe to.
+/// Check only while the notch can be enumerated. A hidden window remains allocated, but
+/// `is_out_of_topmost_band` deliberately skips it as not visible; checking then would therefore
+/// read as permanently broken and fill `run.log` with pointless reassertions.
+#[cfg(windows)]
+fn check(app: &AppHandle) {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let Ok(_checking) = CHECK_LOCK.lock() else {
+        return;
+    };
+    // Mid-drag the carry has its own topmost handling via dropzones::show; do not fight it.
+    if crate::DRAGGING.load(SeqCst) {
+        return;
+    }
+    let Some(window) = app.get_webview_window("notch") else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+    if !is_out_of_topmost_band(&window) {
+        WAS_OUT.store(false, SeqCst);
+        return;
+    }
+    reassert(&window);
+    if !WAS_OUT.swap(true, SeqCst) {
+        crate::applog("topmost watchdog: notch had left the topmost band, reasserted");
+    }
+}
+
+/// The callback runs on the hook thread's message queue. There is no user-data argument in
+/// `WINEVENTPROC`, so the handle comes from `APP`.
+#[cfg(windows)]
+unsafe extern "system" fn on_foreground(
+    _hook: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+    _event: u32,
+    _window: windows::Win32::Foundation::HWND,
+    _object_id: i32,
+    _child_id: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    if let Some(app) = APP.get() {
+        check(app);
+    }
+}
+
+/// Watches foreground changes with `EVENT_SYSTEM_FOREGROUND`, which captures the normal time an
+/// application changes the z-order. A 30-second backstop handles a topmost window that appears
+/// without becoming foreground. Both paths share the visibility and drag gates in `check`.
 #[cfg(windows)]
 pub fn start_watchdog(app: AppHandle) {
+    let _ = APP.set(app.clone());
+    check(&app);
+
+    std::thread::spawn(|| {
+        use windows::Win32::Foundation::HMODULE;
+        use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT,
+        };
+
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                HMODULE::default(),
+                Some(on_foreground),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.is_invalid() {
+            crate::applog("topmost watchdog: could not install foreground hook");
+            return;
+        }
+
+        let mut message = MSG::default();
+        while unsafe { GetMessageW(&mut message, None, 0, 0).0 } > 0 {
+            unsafe { DispatchMessageW(&message) };
+        }
+
+        unsafe {
+            let _ = UnhookWinEvent(hook);
+        }
+    });
+
     std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(TOPMOST_POLL_MS));
-        // Mid-drag the carry has its own topmost handling via dropzones::show; do not fight it.
-        if crate::DRAGGING.load(std::sync::atomic::Ordering::SeqCst) {
-            continue;
-        }
-        let Some(w) = app.get_webview_window("notch") else { continue };
-        if is_out_of_topmost_band(&w) {
-            reassert(&w);
-            crate::applog("topmost watchdog: notch had left the topmost band, reasserted");
-        }
+        std::thread::sleep(std::time::Duration::from_millis(BACKSTOP_POLL_MS));
+        check(&app);
     });
 }
 

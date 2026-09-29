@@ -1,6 +1,6 @@
 // Run with node --test test-light-surface.cjs from windows/.
-// Keeps the two HTML windows on the same small contract: Settings persists a choice and the notch
-// maps it to semantic CSS tokens instead of leaving a pale spinner on a pale surface.
+// Keeps all Windows pages on the same appearance contract: a light choice has a complete palette,
+// SVG colours follow it, and windows that are only briefly visible get it before their first frame.
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const assert = require('node:assert/strict');
@@ -9,36 +9,81 @@ const { test } = require('node:test');
 const root = __dirname;
 const notch = readFileSync(join(root, 'codenotch/ui/notch.html'), 'utf8');
 const settings = readFileSync(join(root, 'codenotch/ui/settings.html'), 'utf8');
+const dropzones = readFileSync(join(root, 'codenotch/ui/dropzones.html'), 'utf8');
+const main = readFileSync(join(root, 'codenotch/src/main.rs'), 'utf8');
+const settingsWindow = readFileSync(join(root, 'codenotch/src/settings_window.rs'), 'utf8');
+const dropzonesWindow = readFileSync(join(root, 'codenotch/src/dropzones.rs'), 'utf8');
 
-function lightTokens(source) {
-  const match = source.match(/body\.light-surface\s*\{([^}]*)\}/);
-  assert.ok(match, 'the notch has a light-surface token block');
-  return match[1].replace(/\s/g, '');
+function cssBlock(source, selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = source.match(new RegExp(`${escaped}\\s*\\{([\\s\\S]*?)\\}`));
+  assert.ok(match, `missing ${selector} palette`);
+  return match[1];
 }
 
-test('light surface layers neutral grays with readable dark marks and restrained status colors', () => {
-  const tokens = lightTokens(notch);
-  for (const token of [
-    '--surface:#f6f6f3;', '--card:#fff;', '--ink:#252522;', '--ink-strong:#161614;',
-    '--edge:#c9c9c3;', '--track:#d8d8d2;', '--usage-ample:#0f704e;',
-    '--usage-watch:#8a5a00;', '--usage-critical:#a83b32;'
-  ]) {
-    assert.ok(tokens.includes(token), `light surface is missing ${token}`);
+function palette(source, selector) {
+  const tokens = new Map();
+  for (const [, name, value] of cssBlock(source, selector).matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
+    tokens.set(name, value.trim());
   }
-  assert.ok(!tokens.includes('--surface:#fff;'), 'the pill avoids a harsh pure-white field');
-  assert.match(notch, /const neutral = name => getComputedStyle\(document\.body\)/,
-    'runtime SVG rings read their neutral colour from the active surface');
-  assert.match(notch, /const usageColor = name => neutral\(`usage-\$\{name\}`\)/,
-    'status colors also follow the active surface');
-  assert.match(notch, /const tone=f=> f>=0\.8\?usageColor\('critical'\) : f>=0\.5\?usageColor\('watch'\) : usageColor\('ample'\);/,
-    'the usage ring reads each band from the active surface');
-  assert.match(notch, /listen\('notch_light_surface',e=>applyLightSurface\(e\.payload\)\)/,
-    'the running notch reacts without a restart');
+  assert.ok(tokens.size > 0, `${selector} declares tokens`);
+  return tokens;
+}
+
+test('light surface is a complete palette and redraws the inline SVG colours', () => {
+  const dark = palette(notch, ':root');
+  const light = palette(notch, ':root[data-theme="light"]');
+
+  assert.deepEqual([...light.keys()].sort(), [...dark.keys()].sort(),
+    'a token absent from light silently keeps its dark value');
+  assert.deepEqual(Object.fromEntries([
+    ['--pill', '#f5f5f7'],
+    ['--card', '#ffffff'],
+    ['--ink', '#1d1d1f'],
+    ['--ink-dim', '#6b6b6b'],
+    ['--ample', '#00A356'],
+    ['--watch', '#B08800'],
+    ['--crit', '#FF3F00'],
+  ].map(([name, value]) => [name, light.get(name)])), {
+    '--pill': '#f5f5f7',
+    '--card': '#ffffff',
+    '--ink': '#1d1d1f',
+    '--ink-dim': '#6b6b6b',
+    '--ample': '#00A356',
+    '--watch': '#B08800',
+    '--crit': '#FF3F00',
+  });
+  assert.notEqual(light.get('--pill'), dark.get('--pill'), 'the selected light palette is distinct');
+
+  assert.match(notch, /function readPalette\(\)\s*\{[\s\S]*?getComputedStyle\(document\.documentElement\)[\s\S]*?--track[\s\S]*?--ample/,
+    'inline SVG values are read from the active palette');
+  const applyTheme = notch.match(/function applyTheme\(name\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(applyTheme, 'the notch applies a resolved theme');
+  assert.match(applyTheme[1], /document\.documentElement\.dataset\.theme\s*=\s*name === 'light' \? 'light' : 'dark'/);
+  assert.match(applyTheme[1], /readPalette\(\);\s*renderRing\(\);/,
+    'changing theme redraws the ring with the new inline colours');
+  assert.match(applyTheme[1], /if\(card&&card\.classList\.contains\('show'\)\) renderCard\(\);/,
+    'an open card redraws its dots too');
+  assert.match(notch, /invoke\('get_theme_resolved'\)\.then\(applyTheme\)/);
+  assert.match(notch, /listen\('theme_resolved',e=>applyTheme\(e\.payload\)\)/);
 });
 
-test('Appearance exposes and persists both named surfaces', () => {
-  assert.match(settings, /id="seg-surface"[\s\S]*data-v="dark"[\s\S]*data-v="light"/);
-  assert.match(settings, /invoke\('set_notch_light_surface', \{ on: lightSurface \}\)/);
-  assert.match(settings, /'Surface':'Superfície'/);
-  assert.match(settings, /'Light':'Clara'/);
+test('Settings and dropzones receive the same theme before either can paint', () => {
+  const themeRow = settings.match(/<span class="seg" id="seg-theme">([\s\S]*?)<\/span>/);
+  assert.ok(themeRow, 'Settings exposes a theme row');
+  for (const choice of ['system', 'light', 'dark']) {
+    assert.match(themeRow[1], new RegExp(`data-v="${choice}"`));
+  }
+  assert.match(settings, /:root\[data-theme="light"\]/, 'Settings has a light palette');
+  assert.match(settings, /invoke\('set_theme', \{ theme: want \}\)/, 'Settings persists a choice');
+  assert.match(settings, /call\('get_theme_resolved', undefined, null\)\.then\(v => \{ if\(typeof v === 'string'\) applyTheme\(v\); \}\)/,
+    'Settings asks for the resolved value when it opens');
+  assert.match(dropzones, /:root\[data-theme="light"\]/, 'dropzones have a matching light outline');
+
+  const initialization = /\.initialization_script\(crate::theme_script\(crate::resolved_theme\(app\)\)\)/;
+  assert.match(settingsWindow, initialization, 'Settings receives its theme before the first frame');
+  assert.match(dropzonesWindow, initialization, 'dropzones receive their theme before the first frame');
+  assert.match(main, /d\.dataset\.theme=window\.__CN_THEME__/, 'the initialization script writes data-theme');
+  assert.match(main, /app\.emit\("theme_resolved", resolved_theme\(app\)\)/,
+    'live choices notify every open page');
 });
